@@ -1,35 +1,53 @@
-from pyspark.ml import PipelineModel
-from pyspark.sql import SparkSession
+"""
+Lightweight text classification module for Django dashboard.
+Uses simple rule-based sentiment analysis without requiring Spark/Java.
+For production ML inference, use the PySpark consumer service.
+"""
+
 import re
 import nltk
-nltk.download('stopwords')
-nltk.download('punkt')
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
-# from pymongo import MongoClient
+# Download required NLTK data (if not already downloaded)
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords', quiet=True)
 
-# import os
-# print(" the model is exist : ", os.path.exists("logistic_regression_model.pkl"))
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt', quiet=True)
 
-# Establish connection to MongoDB
-# client = MongoClient('localhost', 27017)
-# db = client['bigdata_project'] 
-# collection = db['tweets'] 
+# Sentiment lexicons (simplified for demo purposes)
+POSITIVE_WORDS = {
+    'good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'best',
+    'awesome', 'perfect', 'beautiful', 'happy', 'joy', 'pleased', 'delighted', 'impressive',
+    'outstanding', 'superb', 'brilliant', 'magnificent', 'terrific', 'marvelous', 'fabulous',
+    'incredible', 'exceptional', 'remarkable', 'splendid', 'lovely', 'nice', 'enjoy',
+    'liked', 'recommend', 'satisfied', 'positive', 'better', 'improved', 'excited'
+}
 
-# Assuming you have a SparkSession already created
-spark = SparkSession.builder \
-    .appName("classify tweets") \
-    .getOrCreate()
+NEGATIVE_WORDS = {
+    'bad', 'terrible', 'horrible', 'awful', 'poor', 'worst', 'hate', 'disappointing',
+    'disappointed', 'sad', 'angry', 'frustrated', 'annoying', 'annoyed', 'useless',
+    'pathetic', 'disgusting', 'unacceptable', 'broken', 'failed', 'failure', 'problem',
+    'issue', 'wrong', 'error', 'bug', 'crash', 'slow', 'waste', 'regret', 'never',
+    'not recommend', 'avoid', 'dissatisfied', 'negative', 'worse', 'degraded'
+}
 
-# import os
-# print(" the model is exist : ", os.path.exists("../logistic_regression_model.pkl"))
-
-# Load the model
-pipeline = PipelineModel.load("logistic_regression_model.pkl")
+NEUTRAL_INDICATORS = {
+    'update', 'version', 'release', 'announced', 'report', 'news', 'information',
+    'details', 'feature', 'available', 'launched', 'coming', 'planned', 'scheduled',
+    'expected', 'according', 'stated', 'said', 'confirmed', 'official'
+}
 
 def clean_text(text):
+    """Clean and preprocess text for sentiment analysis."""
     if text is not None:
         # Remove links starting with https://, http://, www., or containing .com
-        text = re.sub(r'https?://\S+|www\.\S+|S+\.com\S+|youtu\.be/\S+', '', text)
+        text = re.sub(r'https?://\S+|www\.\S+|\S+\.com\S+|youtu\.be/\S+', '', text)
         
         # Remove words starting with # or @
         text = re.sub(r'(@|#)\w+', '', text)
@@ -37,7 +55,7 @@ def clean_text(text):
         # Convert to lowercase
         text = text.lower()
         
-        # Remove non-alphabitic characters
+        # Remove non-alphabetic characters
         text = re.sub(r'[^a-zA-Z\s]', '', text)
         
         # Remove extra whitespaces
@@ -45,35 +63,102 @@ def clean_text(text):
         return text
     else:
         return ''
+
+
+def classify_text(text: str) -> str:
+    """
+    Classify text sentiment using rule-based approach.
     
-class_index_mapping = { 0: "Negative", 1: "Positive", 2: "Neutral", 3: "Irrelevant" }
-
-
-def classify_text(text: str) :
-    preprocessed_tweet = clean_text(text)
-    data = [(preprocessed_tweet,),]  
-    data = spark.createDataFrame(data, ["Text"])
-    # Apply the pipeline to the new text
-    processed_validation = pipeline.transform(data)
-    prediction = processed_validation.collect()[0][6]
-
-    print("-> Tweet : ", text)
-    print("-> preprocessed_tweet : ", preprocessed_tweet)
-    print("-> Predicted Sentiment : ", prediction)
-    print("-> Predicted Sentiment classname : ", class_index_mapping[int(prediction)])
+    This is a lightweight classification for the Django dashboard.
+    For production ML inference, tweets are processed by the PySpark consumer service.
     
+    Args:
+        text: Input text to classify
+        
+    Returns:
+        Sentiment classification: "Positive", "Negative", "Neutral", or "Irrelevant"
+    """
+    # Preprocess the text
+    cleaned_text = clean_text(text)
+    
+    # Check if text is too short or empty
+    if len(cleaned_text) < 3:
+        return "Irrelevant"
+    
+    # Tokenize and remove stopwords
+    try:
+        tokens = word_tokenize(cleaned_text)
+        stop_words = set(stopwords.words('english'))
+        tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
+    except Exception as e:
+        print(f"Tokenization error: {e}")
+        tokens = cleaned_text.split()
+    
+    # Check for irrelevant content (very short after preprocessing)
+    if len(tokens) < 2:
+        return "Irrelevant"
+    
+    # Calculate sentiment scores
+    positive_score = sum(1 for word in tokens if word in POSITIVE_WORDS)
+    negative_score = sum(1 for word in tokens if word in NEGATIVE_WORDS)
+    neutral_score = sum(1 for word in tokens if word in NEUTRAL_INDICATORS)
+    
+    # Handle negations (simple approach)
+    text_lower = cleaned_text.lower()
+    has_negation = any(neg in text_lower for neg in ['not', 'no', 'never', 'dont', "don't", 'wont', "won't", 'cannot', 'cant', "can't"])
+    
+    if has_negation:
+        # Flip positive and negative scores if negation is present
+        positive_score, negative_score = negative_score, positive_score
+    
+    # Classification logic
+    total_sentiment = positive_score + negative_score
+    
+    # If strong neutral indicators, classify as neutral
+    if neutral_score >= 2 and total_sentiment <= 1:
+        return "Neutral"
+    
+    # If no sentiment words found, classify as neutral
+    if total_sentiment == 0:
+        return "Neutral"
+    
+    # Compare positive vs negative scores
+    if positive_score > negative_score:
+        return "Positive"
+    elif negative_score > positive_score:
+        return "Negative"
+    else:
+        # Tie or equal - classify as neutral
+        return "Neutral"
 
-    # # Prepare document to insert into MongoDB
-    # tweet_doc = {
-    #     "tweet": text,
-    #     "prediction": class_index_mapping[int(prediction)]
-    # }
 
-    # # Insert document into MongoDB collection
-    # collection.insert_one(tweet_doc)
-
-    print("/"*50)
-
-    return class_index_mapping[int(prediction)]
-
-# print("/"*50)
+# For debugging - print classification details
+def classify_text_detailed(text: str) -> dict:
+    """
+    Detailed classification with score breakdown.
+    Used for debugging and understanding classification decisions.
+    """
+    cleaned_text = clean_text(text)
+    
+    try:
+        tokens = word_tokenize(cleaned_text)
+        stop_words = set(stopwords.words('english'))
+        tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
+    except:
+        tokens = cleaned_text.split()
+    
+    positive_score = sum(1 for word in tokens if word in POSITIVE_WORDS)
+    negative_score = sum(1 for word in tokens if word in NEGATIVE_WORDS)
+    neutral_score = sum(1 for word in tokens if word in NEUTRAL_INDICATORS)
+    
+    sentiment = classify_text(text)
+    
+    return {
+        'original_text': text,
+        'cleaned_text': cleaned_text,
+        'tokens': tokens,
+        'positive_score': positive_score,
+        'negative_score': negative_score,
+        'neutral_score': neutral_score,
+        'sentiment': sentiment
+    }
