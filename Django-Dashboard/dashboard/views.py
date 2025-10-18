@@ -7,7 +7,8 @@ from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 
 from django.shortcuts import render
-from pymongo import MongoClient
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for server
@@ -23,27 +24,42 @@ os.makedirs(NLTK_PATH, exist_ok=True)
 nltk.data.path.append(NLTK_PATH)
 
 def ensure_nltk_resources():
-    # punkt tokenizer
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt', download_dir=NLTK_PATH)
-        nltk.download('wordnet')
-        nltk.download('omw-1.4')
-    
-    # stopwords
-    try:
-        nltk.data.find('corpora/stopwords')
-    except LookupError:
-        nltk.download('stopwords', download_dir=NLTK_PATH)
+    """Download required NLTK data"""
+    resources = ['punkt', 'punkt_tab', 'stopwords', 'wordnet', 'omw-1.4']
+    for resource in resources:
+        try:
+            if resource in ['punkt', 'punkt_tab']:
+                nltk.data.find(f'tokenizers/{resource}')
+            elif resource == 'stopwords':
+                nltk.data.find('corpora/stopwords')
+            else:
+                nltk.data.find(f'corpora/{resource}')
+        except LookupError:
+            try:
+                print(f"Downloading NLTK resource: {resource}")
+                nltk.download(resource, download_dir=NLTK_PATH, quiet=True)
+            except Exception as e:
+                print(f"Failed to download {resource}: {e}")
+                # Try without download_dir for system-wide install
+                try:
+                    nltk.download(resource, quiet=True)
+                except:
+                    pass
 
 ensure_nltk_resources()
 
 # -----------------------------------------------------
-# Connect to MongoDB server
+# Connect to PostgreSQL server
 # -----------------------------------------------------
-client = MongoClient('mongodb://localhost:27017/')
-db = client['bigdata_project']
+def get_db_connection():
+    """Get PostgreSQL database connection"""
+    return psycopg2.connect(
+        host=os.getenv('POSTGRES_HOST', 'localhost'),
+        port=os.getenv('POSTGRES_PORT', '5432'),
+        database=os.getenv('POSTGRES_DB', 'bigdata_project'),
+        user=os.getenv('POSTGRES_USER', 'admin'),
+        password=os.getenv('POSTGRES_PASSWORD', 'admin')
+    )
 
 # -----------------------------------------------------
 # Text cleaning and preprocessing
@@ -67,8 +83,8 @@ def preprocess_text(text):
 class_list = ['Negative', 'Positive', 'Neutral', 'Irrelevant']
 
 def plot_word_frequencies_per_class(data):
-    keys_to_extract = ['tweet', 'prediction']
-    result_tuples = [tuple(d[key] for key in keys_to_extract) for d in data]
+    keys_to_extract = ['tweet', 'sentiment_classname']
+    result_tuples = [(d['tweet'], d['sentiment_classname']) for d in data]
 
     static_folder = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'BigDataProject', 'static', 'imgs')
     os.makedirs(static_folder, exist_ok=True)  # Ensure folder exists
@@ -105,7 +121,16 @@ def plot_word_frequencies_per_class(data):
 # Django views
 # -----------------------------------------------------
 def dashboard(request):
-    data = list(db.tweets.find())
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Fetch all tweets from PostgreSQL
+    cur.execute("SELECT id, tweet, preprocessed_tweet, predicted_sentiment, sentiment_classname FROM tweets ORDER BY id DESC")
+    data = cur.fetchall()
+    
+    cur.close()
+    conn.close()
+    
     len_data = len(data)
     print("len_data : ", len_data)
 
@@ -115,7 +140,7 @@ def dashboard(request):
     # Sentiment counts
     sentiment_counts = {label: 0 for label in class_list}
     for entry in data:
-        sentiment_counts[entry['prediction']] += 1
+        sentiment_counts[entry['sentiment_classname']] += 1
 
     # Sentiment rates (%)
     sentiment_rates = {label: round((count / len_data) * 100, 2) for label, count in sentiment_counts.items()}
