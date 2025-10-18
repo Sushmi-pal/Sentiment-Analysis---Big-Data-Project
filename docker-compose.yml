@@ -1,0 +1,254 @@
+version: "3.8"
+
+services:
+  # -------------------------------
+  # Zookeeper
+  # -------------------------------
+  zoo1:
+    image: confluentinc/cp-zookeeper:7.6.0
+    hostname: zoo1
+    container_name: zoo1
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_SERVERS: zoo1:2888:3888
+      ZOOKEEPER_OPTS: "-XX:+IgnoreUnrecognizedVMOptions -XX:-UseContainerSupport"
+    networks:
+      - kafka-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------
+  # Kafka Broker
+  # -------------------------------
+  kafka1:
+    image: confluentinc/cp-kafka:7.3.0
+    hostname: kafka1
+    container_name: kafka1
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+      - "9999:9999"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: "zoo1:2181"
+      KAFKA_BROKER_ID: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: kafka1
+      KAFKA_OPTS: "-XX:+IgnoreUnrecognizedVMOptions -XX:-UseContainerSupport"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      zoo1:
+        condition: service_healthy
+    networks:
+      - kafka-net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # -------------------------------
+  # Kafka Topic Initializer
+  # -------------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kafka-init
+    depends_on:
+      kafka1:
+        condition: service_healthy
+    networks:
+      - kafka-net
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      echo 'Waiting for Kafka to be ready...'
+      sleep 10
+      
+      echo 'Creating Kafka topics...'
+      kafka-topics --create --if-not-exists --topic twitter --bootstrap-server kafka1:9092 --partitions 1 --replication-factor 1
+      kafka-topics --create --if-not-exists --topic numtest --bootstrap-server kafka1:9092 --partitions 1 --replication-factor 1
+      
+      echo 'Listing topics:'
+      kafka-topics --list --bootstrap-server kafka1:9092
+      
+      echo 'Kafka topics created successfully!'
+      "
+
+  # -------------------------------
+  # PostgreSQL (replaces MongoDB)
+  # -------------------------------
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: bigdata_project
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks:
+      - kafka-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------
+  # Kafka Producer (Python)
+  # -------------------------------
+  kafka-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: kafka-producer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:19092
+    networks:
+      - kafka-net
+    restart: on-failure
+
+  # -------------------------------
+  # PySpark Consumer
+  # -------------------------------
+  pyspark-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: pyspark-consumer
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka1:19092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: bigdata_project
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+    networks:
+      - kafka-net
+    restart: on-failure
+
+  # -------------------------------
+  # Django Dashboard
+  # -------------------------------
+  django-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.django
+    container_name: django-dashboard
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: bigdata_project
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      DJANGO_ALLOWED_HOSTS: "*"
+    networks:
+      - kafka-net
+    restart: on-failure
+
+  # -------------------------------
+  # PostgreSQL Exporter (for Prometheus)
+  # -------------------------------
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://admin:admin@postgres:5432/bigdata_project?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - kafka-net
+
+  # -------------------------------
+  # Kafka Exporter (for Prometheus)
+  # -------------------------------
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kafka-exporter
+    ports:
+      - "9308:9308"
+    command:
+      - --kafka.server=kafka1:9092
+    depends_on:
+      kafka1:
+        condition: service_healthy
+    networks:
+      - kafka-net
+
+  # -------------------------------
+  # Prometheus
+  # -------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    depends_on:
+      - kafka-exporter
+      - postgres-exporter
+    networks:
+      - kafka-net
+
+  # -------------------------------
+  # Grafana
+  # -------------------------------
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+      - postgres
+    networks:
+      - kafka-net
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+# -------------------------------
+# Volumes & Networks
+# -------------------------------
+volumes:
+  pg-data:
+  grafana-data:
+
+networks:
+  kafka-net:
+    driver: bridge

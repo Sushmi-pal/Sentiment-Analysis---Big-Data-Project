@@ -1,0 +1,27 @@
+FROM python:3.10-slim
+
+# Install Java (required for PySpark)
+RUN apt-get update && \
+    apt-get install -y default-jdk && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir psycopg2-binary
+
+# Download NLTK data
+RUN python -c "import nltk; nltk.download('stopwords'); nltk.download('punkt')"
+
+# Copy application files
+COPY Kafka-PySpark/consumer-pyspark-docker.py ./consumer-pyspark.py
+
+# Copy the model directory
+COPY ["ML PySpark Model", "./ML PySpark Model"]
+
+CMD ["python", "consumer-pyspark.py"]
