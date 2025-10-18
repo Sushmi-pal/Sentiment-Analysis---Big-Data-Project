@@ -14,6 +14,7 @@ matplotlib.use('Agg')  # Non-interactive backend for server
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
+import csv
 
 # -----------------------------------------------------
 # NLTK setup: download to project folder
@@ -142,6 +143,27 @@ def classify(request):
         if len(text) > 0:
             from .consumer_user import classify_text
             prediction = classify_text(text)
+
+            csv_path = "/home/acer/Documents/Big Data Project/Real-Time-Twitter-Sentiment-Analysis/Kafka-PySpark/twitter_validation.csv"
+            fieldnames = ['Tweet ID', 'Tweet content', 'entity', 'sentiment']
+
+            # === Always write Tweet ID = 1 ===
+            tweet_id = 1
+
+            # === Append to CSV ===
+            file_exists = os.path.isfile(csv_path)
+            with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()
+
+                writer.writerow({
+                    'Tweet ID': tweet_id,
+                    'Tweet content': text,
+                    'entity': "New Data",
+                    'sentiment': prediction
+                })
+
         else:
             error = True
             error_text = "The text is empty! Please enter your text."
@@ -154,3 +176,5 @@ def classify(request):
         'text_len': len(text),
     }
     return render(request, 'dashboard/classify.html', context)
+
+
